@@ -1,0 +1,54 @@
+# Antares Launcher — Windows portable build (Tauri 2 shell)
+#
+# Build exe chạy trực tiếp không cần cài (tauri build --no-bundle) trên runner
+# Windows chính chủ (toolchain MSVC — Tauri 2 không hỗ trợ MinGW-w64: stack
+# windows-rs/webview2-com-sys cần import lib định dạng MSVC).
+#
+# Chạy: tab Actions → "Windows portable build" → Run workflow
+#       (hoặc push tag v*). Artifact: antares-windows-portable.
+name: Windows portable build
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  windows-portable:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # pnpm phải cài trước setup-node để bật cache store pnpm
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install deps (workspace)
+        run: pnpm install --frozen-lockfile
+        shell: bash
+
+      # beforeBuildCommand tự chạy pnpm --filter @antares/desktop build
+      # (vue-tsc + vite) rồi cargo build release; --no-bundle = chỉ exe portable
+      - name: Build portable exe
+        run: pnpm tauri build --no-bundle
+        shell: bash
+
+      # Workspace Cargo gốc (src-tauri là member) → exe ở target/release root;
+      # tauri CLI còn đổi tên binary theo productName → glob *.exe bắt đủ
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: antares-windows-portable
+          path: target/release/*.exe
+          if-no-files-found: error

@@ -1,0 +1,121 @@
+# Antares Launcher 3.0 — CI (spec mục 86 Phase 11: CI build)
+#
+# Job 1 (test): pytest + UI smoke + benchmarks --quick trên 3 OS.
+#               Frontend compile check (node --check) cho mọi JS.
+# Job 2 (build): build portable Linux (.sh) + Windows (.ps1) làm artifact —
+#               chứng minh packaging không hỏng (mục 65). PyInstaller cần
+#               Python có shared libs; runner chính chủ đáp ứng.
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+        shell: bash
+
+      # Các file JS frontend phải parse được (bắt syntax sớm)
+      - name: JS syntax check
+        shell: bash
+        run: |
+          fail=0
+          while IFS= read -r f; do
+            node --check "$f" || fail=1
+          done < <(find frontend -name "*.js" -not -path "*node_modules*")
+          exit $fail
+
+      - name: Unit tests
+        shell: bash
+        run: python -m pytest tests/ -q
+
+      - name: UI smoke (mục 46)
+        shell: bash
+        run: node tests/ui/smoke.mjs
+
+      - name: Benchmarks quick (mục 47)
+        # Windows bash không có /usr/bin/time — benchmark tự đo thời gian
+        shell: bash
+        run: python tests/perf/benchmarks.py --quick
+
+      - name: Headless boot smoke
+        if: runner.os == 'Linux'
+        run: |
+          timeout 15 python -m app.main --headless || code=$?
+          # timeout kill = boot sống tốt (không crash); exit 0 nếu tự thoát
+          [ "$code" = "124" ] || [ "$code" = "0" ] || exit 1
+
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            script: ./packaging/build-portable.sh
+            artifact: dist/Antares-*-portable-*.zip
+          - os: windows-latest
+            script: powershell -ExecutionPolicy Bypass -File packaging/build-portable.ps1
+            artifact: dist/Antares-*-portable.zip
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build portable
+        run: ${{ matrix.script }}
+        shell: bash
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: antares-${{ matrix.os }}-portable
+          path: ${{ matrix.artifact }}
+
+  # Batch 14 — Rust core workspace (8 crates). Exclude antares-desktop (Tauri shell):
+  # cần webkit2gtk system deps trên Linux — build shell được kiểm ở Batch 16 release pipeline.
+  rust:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy (non-blocking, hiển thị lint sớm)
+        continue-on-error: true
+        shell: bash
+        run: cargo clippy --workspace --exclude antares-desktop --all-targets
+
+      - name: Tests (workspace trừ Tauri shell)
+        shell: bash
+        run: cargo test --workspace --exclude antares-desktop
